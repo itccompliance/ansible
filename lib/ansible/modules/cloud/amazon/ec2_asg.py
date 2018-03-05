@@ -1075,11 +1075,16 @@ def replace(connection, module):
     desired_capacity = module.params.get('desired_capacity')
     lc_check = module.params.get('lc_check')
     replace_instances = module.params.get('replace_instances')
+    replace_all_instances = module.params.get('replace_all_instances')
 
     as_group = describe_autoscaling_groups(connection, group_name)[0]
     wait_for_new_inst(module, connection, group_name, wait_timeout, as_group['MinSize'], 'viable_instances')
     props = get_properties(as_group, module)
     instances = props['instances']
+    if replace_all_instances:
+        # If replacing all instances, then set replace_instances to current set
+        # This allows replace_instances and replace_all_instances to behave same
+        replace_instances = instances
     if replace_instances:
         instances = replace_instances
     # check to see if instances are replaceable if checking launch configs
@@ -1117,7 +1122,7 @@ def replace(connection, module):
 
     as_group = describe_autoscaling_groups(connection, group_name)[0]
     update_size(connection, as_group, max_size + batch_size, min_size + batch_size, desired_capacity + batch_size)
-    wait_for_new_inst(module, connection, group_name, wait_timeout, as_group['MinSize'], 'viable_instances')
+    wait_for_new_inst(module, connection, group_name, wait_timeout, as_group['MinSize'] + batch_size, 'viable_instances')
     wait_for_elb(connection, module, group_name)
     wait_for_target_group(connection, module, group_name)
     as_group = describe_autoscaling_groups(connection, group_name)[0]
@@ -1293,6 +1298,12 @@ def wait_for_new_inst(module, connection, group_name, wait_timeout, desired_size
     return props
 
 
+def asg_exists(connection, module):
+    group_name = module.params.get('name')
+    as_group = describe_autoscaling_groups(connection, group_name)
+    return bool(len(as_group))
+
+
 def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(
@@ -1353,14 +1364,19 @@ def main():
         module.fail_json(msg="Can't authorize connection. Check your credentials and profile.",
                          exceptions=traceback.format_exc(), **camel_dict_to_snake_dict(e.response))
     changed = create_changed = replace_changed = False
+    exists = asg_exists(connection, module)
 
     if state == 'present':
         create_changed, asg_properties = create_autoscaling_group(connection, module)
     elif state == 'absent':
         changed = delete_autoscaling_group(connection, module)
         module.exit_json(changed=changed)
-    if replace_all_instances or replace_instances:
+    if exists and (replace_all_instances or replace_instances):
         replace_changed, asg_properties = replace(connection, module)
+
+    # Only replace instances if asg existed at start of call
+    if exists and (replace_all_instances or replace_instances):
+        replace_changed, asg_properties = replace(connection)
     if create_changed or replace_changed:
         changed = True
     module.exit_json(changed=changed, **asg_properties)
